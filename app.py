@@ -20,7 +20,7 @@ nltk.download('stopwords', quiet=True)
 
 load_dotenv()
 
-DEFAULT_SIMILARITY_THRESHOLD = 10
+DEFAULT_SIMILARITY_THRESHOLD = 60
 DEFAULT_SEARCH_DEPTH = 50
 MIN_QUERY_TERMS = 3
 MAX_QUERY_TERMS = 10
@@ -161,46 +161,69 @@ def split_into_sentences(text):
         return sentences
 
 def calculate_exact_match_score(text1, text2):
+    """Calculate similarity score between two texts with improved sequence matching"""
     text1 = clean_text(text1)
     text2 = clean_text(text2)
     
     if text1 == text2:
         return 100.0
-        
-    # Calculate various similarity metrics
-    char_similarity = SequenceMatcher(None, text1, text2).ratio() * 100
+
+    # Break into words and word pairs (bigrams)
+    def get_ngrams(text, n):
+        words = text.split()
+        return [' '.join(words[i:i+n]) for i in range(len(words)-n+1)]
     
-    # Word-based similarity
     words1 = text1.split()
     words2 = text2.split()
-    common_words = set(words1) & set(words2)
-    unique_words = set(words1) | set(words2)
-    word_similarity = (len(common_words) / len(unique_words) * 100) if unique_words else 0
     
-    # Consecutive matching
-    words1_str = ' '.join(words1)
-    words2_str = ' '.join(words2)
-    matcher = SequenceMatcher(None, words1_str, words2_str)
-    match = matcher.find_longest_match(0, len(words1_str), 0, len(words2_str))
-    consecutive_score = (match.size / len(words1_str)) * 100 if words1_str else 0
+    # Get n-grams for different sizes
+    unigrams1 = set(words1)
+    unigrams2 = set(words2)
+    bigrams1 = set(get_ngrams(text1, 2))
+    bigrams2 = set(get_ngrams(text2, 2))
+    trigrams1 = set(get_ngrams(text1, 3))
+    trigrams2 = set(get_ngrams(text2, 3))
     
-    # Calculate TF-IDF similarity
-    try:
-        tfidf = models['tfidf']
-        tfidf_matrix = tfidf.fit_transform([text1, text2])
-        tfidf_similarity = (tfidf_matrix * tfidf_matrix.T).toarray()[0][1] * 100
-    except:
-        tfidf_similarity = 0
+    # Find longest common subsequences
+    def get_common_sequences(seq1, seq2, min_length=3):
+        sequences = []
+        len1, len2 = len(seq1), len(seq2)
+        for i in range(len1):
+            for j in range(len2):
+                k = 0
+                while (i + k < len1 and j + k < len2 and 
+                       seq1[i + k] == seq2[j + k]):
+                    k += 1
+                if k >= min_length:
+                    sequences.append(' '.join(seq1[i:i+k]))
+        return sequences
     
-    # Weighted average of all metrics
+    common_sequences = get_common_sequences(words1, words2)
+    
+    # Calculate scores for different levels of matching
+    unigram_overlap = len(unigrams1 & unigrams2) / len(unigrams1 | unigrams2) * 100
+    bigram_overlap = len(bigrams1 & bigrams2) / len(bigrams1 | bigrams2) * 100 if bigrams1 and bigrams2 else 0
+    trigram_overlap = len(trigrams1 & trigrams2) / len(trigrams1 | trigrams2) * 100 if trigrams1 and trigrams2 else 0
+    
+    # Calculate sequence coverage
+    sequence_words = set(' '.join(common_sequences).split())
+    sequence_coverage = len(sequence_words) / max(len(unigrams1), len(unigrams2)) * 100
+    
+    # Calculate containment for longer phrases
+    total_words = len(words1) + len(words2)
+    sequence_length = sum(len(seq.split()) for seq in common_sequences)
+    sequence_ratio = (sequence_length / total_words) * 200  # Multiply by 2 to normalize to 100
+    
+    # Weighted final score with emphasis on longer matching sequences
     exact_match_score = (
-        char_similarity * 0.25 +
-        word_similarity * 0.25 +
-        consecutive_score * 0.25 +
-        tfidf_similarity * 0.25
+        unigram_overlap * 0.2 +      # Individual word matches
+        bigram_overlap * 0.2 +       # Two-word phrase matches
+        trigram_overlap * 0.2 +      # Three-word phrase matches
+        sequence_coverage * 0.2 +     # Coverage of longest matches
+        sequence_ratio * 0.2         # Proportion of text in matches
     )
     
-    return exact_match_score
+    return min(exact_match_score, 100.0)
 
 def calculate_semantic_similarity(text1, text2):
     try:
