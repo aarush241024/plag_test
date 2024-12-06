@@ -48,23 +48,18 @@ def get_search_results(query, num_results=100):
             "gl": "us",
             "hl": "en"
         })
-        
         results = search.get_dict()
-        
         if "error" in results:
             st.error(f"SerpAPI Error: {results['error']}")
             return []
-            
         if "organic_results" not in results:
             st.warning("No results found in the search.")
             return []
-            
         return [(
             result.get("title", ""),
             result.get("snippet", ""),
             result.get("link", "")
         ) for result in results["organic_results"]]
-        
     except Exception as e:
         st.error(f"Search API Error: {str(e)}")
         return []
@@ -90,33 +85,24 @@ def split_into_sentences(text):
 def calculate_exact_match_score(text1, text2):
     text1 = clean_text(text1)
     text2 = clean_text(text2)
-    
     if text1 == text2:
         return 100.0
-    
     char_similarity = SequenceMatcher(None, text1, text2).ratio() * 100
-    
     words1 = text1.split()
     words2 = text2.split()
-    
     common_words = set(words1) & set(words2)
     unique_words = set(words1) | set(words2)
-    
     word_similarity = (len(common_words) / len(unique_words) * 100) if unique_words else 0
-    
     words1_str = ' '.join(words1)
     words2_str = ' '.join(words2)
-    
     matcher = SequenceMatcher(None, words1_str, words2_str)
     match = matcher.find_longest_match(0, len(words1_str), 0, len(words2_str))
     consecutive_score = (match.size / len(words1_str)) * 100 if words1_str else 0
-    
     exact_match_score = (
         char_similarity * 0.3 +
         word_similarity * 0.3 +
         consecutive_score * 0.4
     )
-    
     return exact_match_score
 
 def calculate_semantic_similarity(text1, text2):
@@ -137,8 +123,8 @@ def analyze_text_similarity(input_text, search_results, similarity_threshold):
         return [], 0, 0, 0, 0, [], {}
     
     sentence_results = []
-    sentence_scores = {}
-    resource_matches = {}
+    sentence_scores = defaultdict(lambda: {'exact': 0, 'semantic': 0})
+    sources = defaultdict(list)
     
     total_sources = len(search_results)
     for idx, (title, snippet, link) in enumerate(search_results):
@@ -148,32 +134,27 @@ def analyze_text_similarity(input_text, search_results, similarity_threshold):
             
             source_text = clean_text(f"{title} {snippet}")
             source_sentences = split_into_sentences(source_text)
-            current_resource_matches = []
             
             if not source_sentences:
                 continue
-            
+                
             for i, input_sentence in enumerate(input_sentences):
                 for source_sentence in source_sentences:
                     exact_score = calculate_exact_match_score(input_sentence, source_sentence)
                     semantic_score = calculate_semantic_similarity(input_sentence, source_sentence)
                     
-                    current_best = sentence_scores.get(i, {'exact': 0, 'semantic': 0})
-                    if exact_score > current_best['exact']:
-                        current_best['exact'] = exact_score
-                    if semantic_score > current_best['semantic']:
-                        current_best['semantic'] = semantic_score
-                    sentence_scores[i] = current_best
+                    if exact_score > sentence_scores[i]['exact']:
+                        sentence_scores[i]['exact'] = exact_score
+                    if semantic_score > sentence_scores[i]['semantic']:
+                        sentence_scores[i]['semantic'] = semantic_score
                     
                     if exact_score >= similarity_threshold:
-                        if exact_score >= 90:
-                            match_type = 'exact'
-                        elif exact_score >= 70:
-                            match_type = 'similar'
-                        elif semantic_score >= 80 and exact_score < 70:
-                            match_type = 'paraphrase'
-                        else:
-                            match_type = 'low_similarity'
+                        match_type = (
+                            'exact' if exact_score >= 90 else
+                            'similar' if exact_score >= 70 else
+                            'paraphrase' if semantic_score >= 80 and exact_score < 70 else
+                            'low_similarity'
+                        )
                         
                         match_data = {
                             'sentence_index': i,
@@ -185,78 +166,36 @@ def analyze_text_similarity(input_text, search_results, similarity_threshold):
                             'source_title': title,
                             'source_link': link
                         }
-                        
                         sentence_results.append(match_data)
-                        current_resource_matches.append(match_data)
-            
-            if current_resource_matches:
-                resource_matches[link] = {
-                    'title': title,
-                    'link': link,
-                    'matches': current_resource_matches,
-                    'match_count': len(current_resource_matches),
-                    'avg_score': sum(m['exact_score'] for m in current_resource_matches) / len(current_resource_matches),
-                    'max_score': max(m['exact_score'] for m in current_resource_matches),
-                    'types': {
-                        'exact': sum(1 for m in current_resource_matches if m['match_type'] == 'exact'),
-                        'similar': sum(1 for m in current_resource_matches if m['match_type'] == 'similar'),
-                        'paraphrase': sum(1 for m in current_resource_matches if m['match_type'] == 'paraphrase')
-                    }
-                }
-                
+                        sources[link].append(match_data)
+                        
         except Exception as e:
             continue
     
     total_sentences = len(input_sentences)
     if total_sentences > 0:
-        exact_matches = sum(1 for i in range(total_sentences) if sentence_scores.get(i, {'exact': 0})['exact'] >= 90)
-        similar_matches = sum(1 for i in range(total_sentences) if 70 <= sentence_scores.get(i, {'exact': 0})['exact'] < 90)
-        semantic_matches = sum(1 for i in range(total_sentences) if sentence_scores.get(i, {'semantic': 0})['semantic'] >= 80 and sentence_scores.get(i, {'exact': 0})['exact'] < 70)
+        all_scores = [scores['exact'] for scores in sentence_scores.values()]
+        
+        exact_matches = sum(1 for score in all_scores if score >= 90)
+        similar_matches = sum(1 for score in all_scores if 70 <= score < 90)
+        paraphrase_matches = sum(1 for i in range(total_sentences)
+                               if sentence_scores[i]['semantic'] >= 80 
+                               and sentence_scores[i]['exact'] < 70)
         
         exact_match_percent = (exact_matches / total_sentences) * 100
         similar_content_percent = (similar_matches / total_sentences) * 100
-        paraphrase_percent = (semantic_matches / total_sentences) * 100
+        paraphrase_percent = (paraphrase_matches / total_sentences) * 100
         
-        internet_score = 0
-        for i in range(total_sentences):
-            scores = sentence_scores.get(i, {'exact': 0, 'semantic': 0})
-            exact_score = scores['exact']
-            semantic_score = scores['semantic']
-            
-            if exact_score >= 90:
-                internet_score += 1.0
-            elif exact_score >= 80:
-                internet_score += 0.9
-            elif exact_score >= 70:
-                internet_score += 0.8
-            elif exact_score >= similarity_threshold:
-                internet_score += 0.7
-            elif semantic_score >= 80:
-                internet_score += 0.6
-            elif semantic_score >= 70:
-                internet_score += 0.4
-            elif semantic_score >= 60:
-                internet_score += 0.2
-        
-        base_internet_percent = (internet_score / total_sentences) * 100
-        
-        boost = 1.0
-        match_ratio = (exact_matches + similar_matches) / total_sentences
-        if match_ratio > 0.8:
-            boost = 1.3
-        elif match_ratio > 0.6:
-            boost = 1.2
-        elif match_ratio > 0.4:
-            boost = 1.1
-        
-        internet_content_percent = min(base_internet_percent * boost, 100)
-        
+        # Calculate internet content score
+        matched_sentences = sum(1 for score in all_scores if score >= similarity_threshold)
+        internet_content_percent = (matched_sentences / total_sentences) * 100
     else:
         exact_match_percent = similar_content_percent = paraphrase_percent = internet_content_percent = 0
     
-    return (sentence_results, exact_match_percent, similar_content_percent, internet_content_percent, paraphrase_percent, input_sentences, resource_matches)
+    return sentence_results, exact_match_percent, similar_content_percent, internet_content_percent, paraphrase_percent, input_sentences, sources
 
-def generate_report(results, exact_percent, similar_percent, internet_percent, paraphrase_percent, similarity_threshold, sources_analyzed, resource_matches):
+def generate_report(results, exact_percent, similar_percent, internet_percent, 
+                   paraphrase_percent, similarity_threshold, sources_analyzed, sources):
     report = f"""Plagiarism Analysis Report
 
 Overall Metrics:
@@ -271,33 +210,33 @@ Sources Analyzed: {sources_analyzed}
 Source Analysis:
 --------------"""
 
-    for resource in sorted(resource_matches.values(), key=lambda x: x['max_score'], reverse=True):
+    for source_link, matches in sources.items():
+        source_title = matches[0]['source_title']
+        max_score = max(m['exact_score'] for m in matches)
+        avg_score = sum(m['exact_score'] for m in matches) / len(matches)
+        
         report += f"""
-Source: {resource['title']}
-URL: {resource['link']}
-- Total Matches: {resource['match_count']}
-- Average Score: {resource['avg_score']:.1f}%
-- Maximum Score: {resource['max_score']:.1f}%
-- Match Types:
-  * Exact: {resource['types']['exact']}
-  * Similar: {resource['types']['similar']}
-  * Paraphrase: {resource['types']['paraphrase']}
+Source: {source_title}
+URL: {source_link}
+Max Match Score: {max_score:.1f}%
+Average Score: {avg_score:.1f}%
+Total Matches: {len(matches)}
 
 Matches:"""
-        
-        for match in sorted(resource['matches'], key=lambda x: x['exact_score'], reverse=True):
+
+        for match in sorted(matches, key=lambda x: x['exact_score'], reverse=True):
             report += f"""
 - Match Score: {match['exact_score']:.1f}%
   Input Text: {match['input_sentence']}
   Matching Text: {match['matching_text']}
-  Type: {match['match_type'].upper()}
+  Semantic Score: {match['semantic_score']:.1f}%
 """
     
     return report
 
 def main():
     st.title("📝 Advanced Plagiarism Detector")
-    st.markdown("*With Enhanced Source Analysis*")
+    st.markdown("*With Enhanced Internet Content Detection*")
     
     try:
         api_key = os.getenv('SERPAPI_KEY')
@@ -342,7 +281,7 @@ def main():
                     if search_results:
                         st.info(f"Found {len(search_results)} sources to analyze...")
                         results, exact_match_percent, similar_content_percent, \
-                        internet_content_percent, paraphrase_percent, input_sentences, resource_matches = \
+                        internet_content_percent, paraphrase_percent, input_sentences, sources = \
                         analyze_text_similarity(input_text, search_results, similarity_threshold)
                         
                         col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
@@ -363,68 +302,50 @@ def main():
                             st.metric("Matched Sentences", f"{len(set(r['sentence_index'] for r in results))}/{len(input_sentences)}" if results else "0/0")
                         with col4:
                             st.metric("Possible Paraphrasing", f"{paraphrase_percent:.1f}%")
-                            st.write("Score Details...")
-
                         
                         if results:
                             st.subheader("📚 Source Analysis")
                             
-                            sorted_resources = sorted(
-                                resource_matches.values(),
-                                key=lambda x: (x['match_count'], x['max_score']),
+                            for source_link, matches in sorted(
+                                sources.items(),
+                                key=lambda x: max(m['exact_score'] for m in x[1]),
                                 reverse=True
-                            )
-                            
-                            for resource in sorted_resources:
-                                with st.expander(
-                                    f"🔍 {resource['title']} "
-                                    f"({resource['match_count']} matches, "
-                                    f"Max Score: {resource['max_score']:.1f}%)"
-                                ):
-                                    st.markdown(f"""
-                                    **Source Details**
-                                    - URL: [{resource['link']}]({resource['link']})
-                                    - Total Matches: {resource['match_count']}
-                                    - Average Match Score: {resource['avg_score']:.1f}%
-                                    - Maximum Match Score: {resource['max_score']:.1f}%
-                                    
-                                    **Match Types**
-                                    - Exact Matches: {resource['types']['exact']}
-                                    - Similar Content: {resource['types']['similar']}
-                                    - Potential Paraphrases: {resource['types']['paraphrase']}
-                                    """)
+                            ):
+                                source_title = matches[0]['source_title']
+                                max_score = max(m['exact_score'] for m in matches)
+                                
+                                with st.expander(f"🔍 {source_title} - Max Match: {max_score:.1f}%"):
+                                    st.markdown(f"**Source URL:** [{source_link}]({source_link})")
+                                    st.markdown(f"**Number of Matches:** {len(matches)}")
                                     
                                     st.markdown("### Matching Content")
-                                    for match in sorted(
-                                        resource['matches'],
-                                        key=lambda x: x['exact_score'],
-                                        reverse=True
-                                    ):
+                                    for match in sorted(matches, key=lambda x: x['exact_score'], reverse=True):
                                         with st.container():
-                                            if match['match_type'] == 'exact':
-                                                st.error(f"⚠️ Exact Match ({match['exact_score']:.1f}%)")
-                                            elif match['match_type'] == 'similar':
-                                                st.warning(f"⚡ Similar Content ({match['exact_score']:.1f}%)")
-                                            else:
-                                                st.info(f"🔄 Potential Paraphrase ({match['exact_score']:.1f}%)")
-                                                
+                                            score_color = (
+                                                "🔴" if match['exact_score'] >= 90 else
+                                                "🟡" if match['exact_score'] >= 70 else
+                                                "🔵"
+                                            )
+                                            
                                             st.markdown(f"""
+                                            {score_color} **Match Score: {match['exact_score']:.1f}%**
+                                            
                                             **Your Text:**
                                             {match['input_sentence']}
                                             
-                                            **Matching Text:**
+                                            **Matched Text:**
                                             {match['matching_text']}
                                             
-                                            **Similarity Scores:**
-                                            - Match Score: {match['exact_score']:.1f}%
+                                            **Match Details:**
+                                            - Exact Score: {match['exact_score']:.1f}%
                                             - Semantic Score: {match['semantic_score']:.1f}%
+                                            - Type: {match['match_type'].title()}
                                             """)
                                             st.markdown("---")
                             
                             match_level = "High" if internet_content_percent > 80 else "Moderate" if internet_content_percent > 50 else "Low"
                             st.warning(f"⚠️ {match_level} level of internet content detected!")
                             
-                            # Source analysis summary
                             st.info(f"""
                             📊 Analysis Summary:
                             - Total Sources: {len(sources)}
@@ -446,7 +367,7 @@ def main():
                                     paraphrase_percent,
                                     similarity_threshold,
                                     len(search_results),
-                                    resource_matches
+                                    sources
                                 )
                                 
                                 st.download_button(
