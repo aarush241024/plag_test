@@ -254,11 +254,10 @@ def analyze_text_similarity(input_text, search_results, similarity_threshold):
             adjusted_exact_score = exact_score * text_ratio / 100
             adjusted_semantic_score = semantic_score * text_ratio / 100
             
-            if adjusted_exact_score >= similarity_threshold or adjusted_semantic_score >= similarity_threshold:
+            if adjusted_exact_score >= similarity_threshold:
                 match_type = (
                     'exact' if adjusted_exact_score >= 90 else
                     'similar' if adjusted_exact_score >= 70 else
-                    'paraphrase' if adjusted_semantic_score >= 80 and adjusted_exact_score < 70 else
                     'low_similarity'
                 )
                 
@@ -299,27 +298,21 @@ def analyze_text_similarity(input_text, search_results, similarity_threshold):
     
     if results:
         max_exact = max(r['adjusted_exact_score'] for r in results)
-        max_semantic = max(r['adjusted_semantic_score'] for r in results)
-        
         exact_matches = sum(1 for r in results if r['adjusted_exact_score'] >= 90)
         similar_matches = sum(1 for r in results if 70 <= r['adjusted_exact_score'] < 90)
-        paraphrase_matches = sum(1 for r in results 
-                               if r['adjusted_semantic_score'] >= 80 
-                               and r['adjusted_exact_score'] < 70)
         
         total_matches = len(results)
         exact_match_percent = max_exact
         similar_content_percent = (similar_matches / total_matches * 100) if total_matches > 0 else 0
-        paraphrase_percent = (paraphrase_matches / total_matches * 100) if total_matches > 0 else 0
         internet_content_percent = total_plagiarism_score
     else:
-        exact_match_percent = similar_content_percent = paraphrase_percent = internet_content_percent = 0
+        exact_match_percent = similar_content_percent = internet_content_percent = 0
     
     return (results, exact_match_percent, similar_content_percent, 
-            internet_content_percent, paraphrase_percent, [cleaned_input], sources)
+            internet_content_percent, [cleaned_input], sources)
 
 def generate_report(results, exact_percent, similar_percent, internet_percent, 
-                   paraphrase_percent, similarity_threshold, sources_analyzed, sources):
+                   similarity_threshold, sources_analyzed, sources):
     """Generate a detailed analysis report with text ratio information"""
     report = f"""Plagiarism Analysis Report
 
@@ -328,7 +321,6 @@ Overall Metrics:
 Final Plagiarism Score: {internet_percent:.1f}%
 Exact Matches: {exact_percent:.1f}%
 Similar Content: {similar_percent:.1f}%
-Potential Paraphrasing: {paraphrase_percent:.1f}%
 Similarity Threshold: {similarity_threshold}%
 Sources Analyzed: {sources_analyzed}
 
@@ -412,7 +404,6 @@ Analysis Summary:
 - Match Types:
   * Exact Matches: {exact_percent:.1f}%
   * Similar Content: {similar_percent:.1f}%
-  * Potential Paraphrasing: {paraphrase_percent:.1f}%
 
 Note: Scores are adjusted based on the ratio of text lengths between input and sources.
 """
@@ -472,11 +463,11 @@ def main():
                         st.info(f"Found {len(search_results)} sources to analyze...")
                         
                         results, exact_match_percent, similar_content_percent, \
-                        internet_content_percent, paraphrase_percent, input_sentences, sources = \
+                        internet_content_percent, input_sentences, sources = \
                         analyze_text_similarity(input_text, search_results, similarity_threshold)
                         
                         # Display results in columns
-                        col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+                        col1, col2, col3 = st.columns([1, 1, 1])
                         
                         with col1:
                             st.metric("Final Plagiarism Score", f"{internet_content_percent:.1f}%")
@@ -495,10 +486,6 @@ def main():
                             else:
                                 st.metric(content_label, f"{100 - internet_content_percent:.1f}%", delta="High")
                             st.metric("Matched Sources", f"{len(sources)}" if sources else "0")
-                        
-                        with col4:
-                            st.metric("Paraphrase Detection", f"{paraphrase_percent:.1f}%")
-                            st.metric("Sources Analyzed", str(len(sources)))
                         
                         if results:
                             st.subheader("📚 Detailed Source Analysis")
@@ -562,7 +549,6 @@ def main():
                                     exact_match_percent,
                                     similar_content_percent,
                                     internet_content_percent,
-                                    paraphrase_percent,
                                     similarity_threshold,
                                     len(search_results),
                                     sources
@@ -594,7 +580,6 @@ def main():
     2. Similarity Detection:
        - Exact Match Detection
        - Semantic Analysis
-       - Paraphrase Recognition
        - Length-Aware Scoring
 
     3. Search Optimization:
