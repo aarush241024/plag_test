@@ -25,10 +25,11 @@ DEFAULT_SEARCH_DEPTH = 50
 MIN_QUERY_TERMS = 3
 MAX_QUERY_TERMS = 10
 
-# Fair Metrics thresholds
-EXACT_MATCH_THRESHOLD = 0.8
-HIGH_SIMILARITY_THRESHOLD = 0.6
-CITATION_THRESHOLD = 0.7
+EXACT_MATCH_THRESHOLD = 85
+HIGH_SIMILARITY_THRESHOLD = 70
+SEMANTIC_MATCH_THRESHOLD = 75
+INTERNET_CONTENT_HIGH = 80
+INTERNET_CONTENT_MODERATE = 50
 
 @st.cache_resource
 def load_models():
@@ -51,19 +52,42 @@ def preprocess_text(text):
     words = [w for w in words if w not in stop_words and len(w) > 2]
     return ' '.join(words)
 
+def get_text_stats(text):
+    """Get word count and character count for a text"""
+    words = word_tokenize(clean_text(text))
+    return {
+        'word_count': len(words),
+        'char_count': len(text)
+    }
+
+def calculate_text_ratio(input_text, source_text):
+    """Calculate the ratio between input text and source text"""
+    input_stats = get_text_stats(input_text)
+    source_stats = get_text_stats(source_text)
+    
+    word_ratio = (input_stats['word_count'] / source_stats['word_count'] 
+                 if source_stats['word_count'] > 0 else 0)
+    char_ratio = (input_stats['char_count'] / source_stats['char_count'] 
+                 if source_stats['char_count'] > 0 else 0)
+    
+    return (word_ratio + char_ratio) / 2 * 100
+
 def extract_key_terms(text, n_terms=8):
     """Extract key terms from text using TF-IDF"""
     processed_text = preprocess_text(text)
+    
     vectorizer = TfidfVectorizer(ngram_range=(1, 2))
     try:
         tfidf_matrix = vectorizer.fit_transform([processed_text])
     except ValueError:
         return []
-    
+
     feature_names = vectorizer.get_feature_names_out()
     scores = tfidf_matrix.toarray()[0]
+    
     term_scores = [(term, score) for term, score in zip(feature_names, scores)]
     term_scores.sort(key=lambda x: x[1], reverse=True)
+    
     return [term for term, _ in term_scores[:n_terms]]
 
 def generate_search_queries(text):
@@ -83,9 +107,10 @@ def generate_search_queries(text):
     return list(set(queries))[:5]
 
 def get_search_results(text, num_results=100):
-    """Enhanced search with multiple queries using SerpAPI's Google Search"""
+    """Enhanced search with multiple queries using SerpAPI"""
     all_results = []
     seen_links = set()
+    
     queries = generate_search_queries(text)
     
     for query in queries:
@@ -100,6 +125,7 @@ def get_search_results(text, num_results=100):
             })
             
             results = search.get_dict()
+            
             if "error" in results:
                 st.error(f"SerpAPI Error: {results['error']}")
                 continue
@@ -130,124 +156,86 @@ def clean_text(text):
     text = text.lower()
     return text.strip()
 
-def extract_statements(text):
-    """
-    Extract statements from text using sentence tokenization 
-    and citation analysis
-    """
-    sentences = sent_tokenize(text)
-    statements = []
+def calculate_exact_match_score(text1, text2):
+    """Calculate similarity score between two texts"""
+    text1 = clean_text(text1)
+    text2 = clean_text(text2)
     
-    for sentence in sentences:
-        clean_sentence = clean_text(sentence)
-        if len(clean_sentence) < 10:
-            continue
-            
-        has_citation = bool(re.search(r'\(\d{4}\)|\[\d+\]|et al\.', sentence))
-        is_properly_cited = bool(re.search(r'\(([A-Za-z]+,?\s*)+\d{4}\)', sentence))
-        
-        statement = {
-            'text': clean_sentence,
-            'has_citation': has_citation,
-            'is_properly_cited': is_properly_cited,
-            'embedding': None
-        }
-        statements.append(statement)
-    
-    return statements
+    if text1 == text2:
+        return 100.0
 
-def calculate_statement_similarity(stmt1, stmt2):
-    """Calculate semantic similarity between statements"""
-    if stmt1['embedding'] is None:
-        stmt1['embedding'] = models['semantic'].encode(stmt1['text'], convert_to_tensor=True)
-    if stmt2['embedding'] is None:
-        stmt2['embedding'] = models['semantic'].encode(stmt2['text'], convert_to_tensor=True)
+    def get_ngrams(text, n):
+        words = text.split()
+        return [' '.join(words[i:i+n]) for i in range(len(words)-n+1)]
     
-    similarity = np.dot(stmt1['embedding'].cpu().numpy(), 
-                       stmt2['embedding'].cpu().numpy())
-    return similarity
+    words1 = text1.split()
+    words2 = text2.split()
+    
+    unigrams1 = set(words1)
+    unigrams2 = set(words2)
+    bigrams1 = set(get_ngrams(text1, 2))
+    bigrams2 = set(get_ngrams(text2, 2))
+    trigrams1 = set(get_ngrams(text1, 3))
+    trigrams2 = set(get_ngrams(text2, 3))
+    
+    def get_common_sequences(seq1, seq2, min_length=3):
+        sequences = []
+        len1, len2 = len(seq1), len(seq2)
+        for i in range(len1):
+            for j in range(len2):
+                k = 0
+                while (i + k < len1 and j + k < len2 and 
+                       seq1[i + k] == seq2[j + k]):
+                    k += 1
+                if k >= min_length:
+                    sequences.append(' '.join(seq1[i:i+k]))
+        return sequences
+    
+    common_sequences = get_common_sequences(words1, words2)
+    
+    unigram_overlap = len(unigrams1 & unigrams2) / len(unigrams1 | unigrams2) * 100
+    bigram_overlap = len(bigrams1 & bigrams2) / len(bigrams1 | bigrams2) * 100 if bigrams1 and bigrams2 else 0
+    trigram_overlap = len(trigrams1 & trigrams2) / len(trigrams1 | trigrams2) * 100 if trigrams1 and trigrams2 else 0
+    
+    sequence_words = set(' '.join(common_sequences).split())
+    sequence_coverage = len(sequence_words) / max(len(unigrams1), len(unigrams2)) * 100
+    
+    total_words = len(words1) + len(words2)
+    sequence_length = sum(len(seq.split()) for seq in common_sequences)
+    sequence_ratio = (sequence_length / total_words) * 200
+    
+    exact_match_score = (
+        unigram_overlap * 0.2 +
+        bigram_overlap * 0.2 +
+        trigram_overlap * 0.2 +
+        sequence_coverage * 0.2 +
+        sequence_ratio * 0.2
+    )
+    
+    return min(exact_match_score, 100.0)
 
-def classify_statement_pair(test_stmt, control_stmt, similarity_threshold=0.8):
-    """
-    Classify statement relationships based on Fair Metrics:
-    Q: Quoted (correctly cited)
-    M: Misquoted (incorrectly cited)
-    P: Plagiarized (uncited)
-    N: Novel
-    """
-    similarity = calculate_statement_similarity(test_stmt, control_stmt)
-    
-    if similarity >= similarity_threshold:
-        if test_stmt['is_properly_cited']:
-            return 'Q', similarity
-        elif test_stmt['has_citation']:
-            return 'M', similarity
-        else:
-            return 'P', similarity
-    else:
-        return 'N', similarity
-
-def calculate_fair_metrics(test_text, control_text):
-    """Calculate Fair Metrics for plagiarism detection"""
-    test_statements = extract_statements(test_text)
-    control_statements = extract_statements(control_text)
-    
-    metrics = {
-        'Q': 0,  # Quoted (correctly cited)
-        'M': 0,  # Misquoted (incorrectly cited)
-        'P': 0,  # Plagiarized (uncited)
-        'N': 0,  # Novel
-        'statement_details': []
-    }
-    
-    for test_stmt in test_statements:
-        best_match_type = 'N'
-        best_match_score = 0
-        best_match_stmt = None
-        
-        for control_stmt in control_statements:
-            stmt_type, similarity = classify_statement_pair(test_stmt, control_stmt)
-            
-            if similarity > best_match_score:
-                best_match_type = stmt_type
-                best_match_score = similarity
-                best_match_stmt = control_stmt
-        
-        metrics[best_match_type] += 1
-        
-        if best_match_stmt:
-            metrics['statement_details'].append({
-                'test_statement': test_stmt['text'],
-                'control_statement': best_match_stmt['text'],
-                'type': best_match_type,
-                'similarity': best_match_score
-            })
-    
-    metrics['S'] = metrics['M'] + metrics['Q'] + metrics['P']
-    metrics['R'] = metrics['S'] + metrics['N']
-    metrics['K'] = len(control_statements)
-    
+def calculate_semantic_similarity(text1, text2):
+    """Calculate semantic similarity between two texts"""
     try:
-        F1 = metrics['Q'] / metrics['S'] if metrics['S'] > 0 else 0
-        F2 = (metrics['Q'] - metrics['M']) / metrics['S'] if metrics['S'] > 0 else 0
-        F3 = (metrics['Q'] - metrics['P']) / metrics['S'] if metrics['S'] > 0 else 0
-        F4 = (metrics['Q'] - metrics['N']) / metrics['R'] if metrics['R'] > 0 else 0
-        
-        F1 = max(0, min(1, F1))
-        F2 = max(-1, min(1, F2))
-        F3 = max(-1, min(1, F3))
-        F4 = max(-1, min(1, F4))
-        
-    except ZeroDivisionError:
-        return 0, 0, 0, 0, metrics
-    
-    return F1, F2, F3, F4, metrics
+        embeddings = models['semantic'].encode([text1, text2], convert_to_tensor=True)
+        embedding1 = embeddings[0].cpu().numpy()
+        embedding2 = embeddings[1].cpu().numpy()
+        similarity = np.dot(embedding1, embedding2)
+        return similarity * 100
+    except:
+        return 0
 
 def analyze_text_similarity(input_text, search_results, similarity_threshold):
-    """Analyze text similarity using Fair Metrics"""
+    """Analyze text similarity with enhanced ratio-based matching"""
     cleaned_input = clean_text(input_text)
     results = []
     sources = defaultdict(list)
+    
+    input_stats = get_text_stats(cleaned_input)
+    total_plagiarism_score = 0
+    source_scores = []
+    
+    input_vector = models['semantic'].encode(cleaned_input, convert_to_tensor=True)
     
     total_sources = len(search_results)
     for idx, (title, snippet, link) in enumerate(search_results):
@@ -259,156 +247,181 @@ def analyze_text_similarity(input_text, search_results, similarity_threshold):
             if not source_text:
                 continue
             
-            F1, F2, F3, F4, metrics = calculate_fair_metrics(cleaned_input, source_text)
+            exact_score = calculate_exact_match_score(cleaned_input, source_text)
+            semantic_score = calculate_semantic_similarity(cleaned_input, source_text)
+            text_ratio = calculate_text_ratio(cleaned_input, source_text)
             
-            plagiarism_score = (
-                (F1 * 40) +
-                (abs(F2) * -20) +
-                (abs(F3) * -30) +
-                (abs(F4) * -10)
-            ) + 100
+            adjusted_exact_score = exact_score * text_ratio / 100
+            adjusted_semantic_score = semantic_score * text_ratio / 100
             
-            if plagiarism_score >= similarity_threshold:
+            if adjusted_exact_score >= similarity_threshold or adjusted_semantic_score >= similarity_threshold:
                 match_type = (
-                    'exact' if metrics['P'] / metrics['R'] > 0.7 else
-                    'similar' if metrics['Q'] / metrics['R'] > 0.5 else
-                    'improper' if metrics['M'] / metrics['R'] > 0.3 else
+                    'exact' if adjusted_exact_score >= 90 else
+                    'similar' if adjusted_exact_score >= 70 else
+                    'paraphrase' if adjusted_semantic_score >= 80 and adjusted_exact_score < 70 else
                     'low_similarity'
                 )
+                
+                source_stats = get_text_stats(source_text)
                 
                 match_data = {
                     'input_text': cleaned_input,
                     'matching_text': source_text,
-                    'plagiarism_score': plagiarism_score,
-                    'metrics': metrics,
-                    'F1': F1 * 100,
-                    'F2': F2 * 100,
-                    'F3': F3 * 100,
-                    'F4': F4 * 100,
+                    'exact_score': exact_score,
+                    'adjusted_exact_score': adjusted_exact_score,
+                    'semantic_score': semantic_score,
+                    'adjusted_semantic_score': adjusted_semantic_score,
+                    'text_ratio': text_ratio,
                     'match_type': match_type,
                     'source_title': title,
                     'source_link': link,
-                    'statement_details': metrics['statement_details']
+                    'source_word_count': source_stats['word_count'],
+                    'input_word_count': input_stats['word_count']
                 }
                 
                 results.append(match_data)
                 sources[link].append(match_data)
                 
+                source_scores.append({
+                    'score': adjusted_exact_score,
+                    'word_count': source_stats['word_count']
+                })
+                        
         except Exception as e:
             continue
+
+    if source_scores:
+        total_words = sum(score['word_count'] for score in source_scores)
+        total_plagiarism_score = sum(
+            score['score'] * (score['word_count'] / total_words)
+            for score in source_scores
+        )
     
     if results:
-        total_statements = sum(len(r['metrics']['statement_details']) for r in results)
-        total_plagiarized = sum(r['metrics']['P'] for r in results)
-        total_misquoted = sum(r['metrics']['M'] for r in results)
-        total_quoted = sum(r['metrics']['Q'] for r in results)
+        max_exact = max(r['adjusted_exact_score'] for r in results)
+        max_semantic = max(r['adjusted_semantic_score'] for r in results)
         
-        exact_match_percent = (total_plagiarized / total_statements * 100) if total_statements > 0 else 0
-        similar_content_percent = (total_quoted / total_statements * 100) if total_statements > 0 else 0
-        improper_citation_percent = (total_misquoted / total_statements * 100) if total_statements > 0 else 0
-        internet_content_percent = max(r['plagiarism_score'] for r in results)
+        exact_matches = sum(1 for r in results if r['adjusted_exact_score'] >= 90)
+        similar_matches = sum(1 for r in results if 70 <= r['adjusted_exact_score'] < 90)
+        paraphrase_matches = sum(1 for r in results 
+                               if r['adjusted_semantic_score'] >= 80 
+                               and r['adjusted_exact_score'] < 70)
+        
+        total_matches = len(results)
+        exact_match_percent = max_exact
+        similar_content_percent = (similar_matches / total_matches * 100) if total_matches > 0 else 0
+        paraphrase_percent = (paraphrase_matches / total_matches * 100) if total_matches > 0 else 0
+        internet_content_percent = total_plagiarism_score
     else:
-        exact_match_percent = similar_content_percent = improper_citation_percent = internet_content_percent = 0
+        exact_match_percent = similar_content_percent = paraphrase_percent = internet_content_percent = 0
     
     return (results, exact_match_percent, similar_content_percent, 
-            internet_content_percent, improper_citation_percent, [cleaned_input], sources)
+            internet_content_percent, paraphrase_percent, [cleaned_input], sources)
 
-def generate_report(results, exact_percent, similar_percent, plagiarism_percent, 
-                   improper_percent, similarity_threshold, sources_analyzed, sources):
-    """Generate detailed analysis report using Fair Metrics"""
-    report = f"""Fair Metrics Plagiarism Analysis Report
+def generate_report(results, exact_percent, similar_percent, internet_percent, 
+                   paraphrase_percent, similarity_threshold, sources_analyzed, sources):
+    """Generate a detailed analysis report with text ratio information"""
+    report = f"""Plagiarism Analysis Report
 
 Overall Metrics:
 ---------------
-Plagiarism Score: {plagiarism_percent:.1f}%
-Correctly Cited Content: {similar_percent:.1f}%
-Uncited Similar Content: {exact_percent:.1f}%
-Improper Citations: {improper_percent:.1f}%
+Final Plagiarism Score: {internet_percent:.1f}%
+Exact Matches: {exact_percent:.1f}%
+Similar Content: {similar_percent:.1f}%
+Potential Paraphrasing: {paraphrase_percent:.1f}%
 Similarity Threshold: {similarity_threshold}%
 Sources Analyzed: {sources_analyzed}
 
-Analysis Method:
---------------
-- Statement-level analysis
-- Citation pattern recognition
-- Semantic similarity computation
-- Fair Metrics scoring (F1, F2, F3, F4)
+Analysis Methodology:
+-------------------
+- Text ratio analysis comparing input and source lengths
+- Semantic similarity detection using transformer models
+- N-gram analysis for exact matching
+- Weighted scoring based on text overlap
+- Length-adjusted similarity calculations
 
 Detailed Source Analysis:
-----------------------"""
+-----------------------"""
 
     for source_link, matches in sources.items():
         source_title = matches[0]['source_title']
-        
-        # Calculate source-level metrics
-        total_statements = sum(len(m['statement_details']) for m in matches)
-        total_quoted = sum(m['metrics']['Q'] for m in matches)
-        total_misquoted = sum(m['metrics']['M'] for m in matches)
-        total_plagiarized = sum(m['metrics']['P'] for m in matches)
-        
-        avg_F1 = sum(m['F1'] for m in matches) / len(matches)
-        avg_F2 = sum(m['F2'] for m in matches) / len(matches)
-        avg_F3 = sum(m['F3'] for m in matches) / len(matches)
-        avg_F4 = sum(m['F4'] for m in matches) / len(matches)
+        max_score = max(m['adjusted_exact_score'] for m in matches)
+        avg_score = sum(m['adjusted_exact_score'] for m in matches) / len(matches)
+        max_ratio = max(m['text_ratio'] for m in matches)
         
         report += f"""
 
 Source: {source_title}
 URL: {source_link}
-Fair Metrics:
-- F1 (Citation Quality): {avg_F1:.1f}%
-- F2 (Citation Accuracy): {avg_F2:.1f}%
-- F3 (Uncited Content): {avg_F3:.1f}%
-- F4 (Content Novelty): {avg_F4:.1f}%
+Max Match Score (Adjusted): {max_score:.1f}%
+Average Score (Adjusted): {avg_score:.1f}%
+Text Length Ratio: {max_ratio:.1f}%
+Total Matches: {len(matches)}
 
-Statement Analysis:
-- Total Statements: {total_statements}
-- Correctly Cited: {total_quoted}
-- Incorrectly Cited: {total_misquoted}
-- Uncited Similar: {total_plagiarized}
+Individual Matches:"""
 
-Matching Statements:"""
-
-        for match in matches:
-            for detail in match['statement_details']:
-                report += f"""
-
-Statement Type: {detail['type']}
-Similarity: {detail['similarity']:.1f}
-Input: {detail['test_statement']}
-Match: {detail['control_statement']}
+        for match in sorted(matches, key=lambda x: x['adjusted_exact_score'], reverse=True):
+            report += f"""
+- Match Score: {match['adjusted_exact_score']:.1f}% (Original: {match['exact_score']:.1f}%)
+  Text Ratio: {match['text_ratio']:.1f}%
+  Input Words: {match['input_word_count']}
+  Source Words: {match['source_word_count']}
+  
+  Input Text:
+  {match['input_text']}
+  
+  Matching Text:
+  {match['matching_text']}
+  
+  Additional Metrics:
+  - Semantic Score (Adjusted): {match['adjusted_semantic_score']:.1f}%
+  - Match Type: {match['match_type']}
 """
-    
-    # Add recommendations section
+
     report += """
 
 Recommendations:
 --------------"""
     
-    if plagiarism_percent > 80:
+    if internet_percent > INTERNET_CONTENT_HIGH:
         report += """
-- High levels of uncited content detected
-- Significant revision needed
-- Add proper citations for similar content
-- Rephrase copied sections"""
-    elif plagiarism_percent > 50:
+- High level of matched content detected
+- Significant revision recommended for sections with high similarity
+- Consider rewriting matched passages using original language
+- Review all sources and add proper citations where needed"""
+    elif internet_percent > INTERNET_CONTENT_MODERATE:
         report += """
-- Moderate levels of similar content found
-- Review and add missing citations
-- Consider rephrasing some sections
-- Check citation formatting"""
+- Moderate level of matched content found
+- Some revision may be needed for highly similar sections
+- Review matches and consider rephrasing
+- Ensure all sources are properly cited"""
     else:
         report += """
-- Low similarity levels detected
-- Add citations where needed
-- Verify citation formatting
-- Minor revisions recommended"""
+- Low level of matched content detected
+- Minor revisions may improve originality
+- Consider reviewing any exact matches
+- Ensure proper citation for any referenced material"""
+
+    report += f"""
+
+Analysis Summary:
+---------------
+- Total Sources Analyzed: {sources_analyzed}
+- Sources with Matches: {len(sources)}
+- Overall Similarity: {internet_percent:.1f}%
+- Match Types:
+  * Exact Matches: {exact_percent:.1f}%
+  * Similar Content: {similar_percent:.1f}%
+  * Potential Paraphrasing: {paraphrase_percent:.1f}%
+
+Note: Scores are adjusted based on the ratio of text lengths between input and sources.
+"""
     
     return report
 
 def main():
-    st.title("📝 Fair Metrics Plagiarism Detector")
-    st.markdown("*Using Statement Analysis and Citation Recognition*")
+    st.title("📝 Enhanced Plagiarism Detector")
+    st.markdown("*With Advanced Text Ratio Analysis*")
     
     try:
         api_key = os.getenv('SERPAPI_KEY')
@@ -430,7 +443,7 @@ def main():
         min_value=0, 
         max_value=100, 
         value=DEFAULT_SIMILARITY_THRESHOLD,
-        help="Adjust the minimum similarity threshold for detection"
+        help="Adjust the minimum similarity threshold for match detection"
     )
     
     search_depth = st.sidebar.slider(
@@ -438,7 +451,7 @@ def main():
         min_value=10, 
         max_value=100, 
         value=DEFAULT_SEARCH_DEPTH,
-        help="Number of sources to analyze"
+        help="Number of search results to analyze"
     )
     
     if st.button("🔍 Analyze Text"):
@@ -447,10 +460,10 @@ def main():
         else:
             with st.spinner("🔄 Processing text..."):
                 try:
-                    st.info("📊 Analyzing text structure and citations...")
-                    statements = extract_statements(input_text)
-                    if statements:
-                        st.success(f"Found {len(statements)} statements to analyze")
+                    st.info("📊 Vectorizing input text and extracting key terms...")
+                    key_terms = extract_key_terms(input_text)
+                    if key_terms:
+                        st.success(f"Key terms identified: {', '.join(key_terms)}")
                     
                     st.info("🌐 Searching for similar content...")
                     search_results = get_search_results(input_text, search_depth)
@@ -459,31 +472,32 @@ def main():
                         st.info(f"Found {len(search_results)} sources to analyze...")
                         
                         results, exact_match_percent, similar_content_percent, \
-                        plagiarism_percent, improper_percent, input_sentences, sources = \
+                        internet_content_percent, paraphrase_percent, input_sentences, sources = \
                         analyze_text_similarity(input_text, search_results, similarity_threshold)
                         
+                        # Display results in columns
                         col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
                         
                         with col1:
-                            st.metric("Fair Score (F1)", f"{sum(r['F1'] for r in results)/len(results):.1f}%" if results else "0%")
-                            st.metric("Citation Quality", f"{similar_content_percent:.1f}%")
+                            st.metric("Final Plagiarism Score", f"{internet_content_percent:.1f}%")
+                            st.metric("Total Input Words", str(get_text_stats(input_text)['word_count']))
                         
                         with col2:
-                            st.metric("Citation Issues (F2)", f"{sum(r['F2'] for r in results)/len(results):.1f}%" if results else "0%")
-                            st.metric("Improper Citations", f"{improper_percent:.1f}%")
+                            st.metric("Similar Content", f"{similar_content_percent:.1f}%")
+                            st.metric("Max Match Score", f"{max((r['adjusted_exact_score'] for r in results), default=0):.1f}%")
                         
                         with col3:
-                            plagiarism_label = "Plagiarism Score 🌐"
-                            if plagiarism_percent > 80:
-                                st.metric(plagiarism_label, f"{plagiarism_percent:.1f}%", delta="High", delta_color="inverse")
-                            elif plagiarism_percent > 50:
-                                st.metric(plagiarism_label, f"{plagiarism_percent:.1f}%", delta="Medium", delta_color="off")
+                            content_label = "Content Originality"
+                            if internet_content_percent > 80:
+                                st.metric(content_label, f"{100 - internet_content_percent:.1f}%", delta="Low", delta_color="inverse")
+                            elif internet_content_percent > 50:
+                                st.metric(content_label, f"{100 - internet_content_percent:.1f}%", delta="Medium", delta_color="off")
                             else:
-                                st.metric(plagiarism_label, f"{plagiarism_percent:.1f}%", delta="Low")
-                            st.metric("Uncited Content", f"{exact_match_percent:.1f}%")
+                                st.metric(content_label, f"{100 - internet_content_percent:.1f}%", delta="High")
+                            st.metric("Matched Sources", f"{len(sources)}" if sources else "0")
                         
                         with col4:
-                            st.metric("Content Novelty (F4)", f"{sum(r['F4'] for r in results)/len(results):.1f}%" if results else "0%")
+                            st.metric("Paraphrase Detection", f"{paraphrase_percent:.1f}%")
                             st.metric("Sources Analyzed", str(len(sources)))
                         
                         if results:
@@ -491,71 +505,64 @@ def main():
                             
                             for source_link, matches in sorted(
                                 sources.items(),
-                                key=lambda x: max(m['plagiarism_score'] for m in x[1]),
+                                key=lambda x: max(m['adjusted_exact_score'] for m in x[1]),
                                 reverse=True
                             ):
                                 source_title = matches[0]['source_title']
-                                max_score = max(m['plagiarism_score'] for m in matches)
+                                max_score = max(m['adjusted_exact_score'] for m in matches)
                                 
-                                with st.expander(f"🔍 {source_title} - Plagiarism Score: {max_score:.1f}%"):
+                                with st.expander(f"🔍 {source_title} - Match Score: {max_score:.1f}%"):
                                     st.markdown(f"**Source URL:** [{source_link}]({source_link})")
+                                    st.markdown(f"**Number of Matches:** {len(matches)}")
                                     
-                                    # Display Fair Metrics for this source
-                                    avg_metrics = {
-                                        'F1': sum(m['F1'] for m in matches) / len(matches),
-                                        'F2': sum(m['F2'] for m in matches) / len(matches),
-                                        'F3': sum(m['F3'] for m in matches) / len(matches),
-                                        'F4': sum(m['F4'] for m in matches) / len(matches)
-                                    }
+                                    # Display text ratio information
+                                    st.markdown("### Content Analysis")
+                                    max_ratio = max(m['text_ratio'] for m in matches)
+                                    st.markdown(f"**Text Length Ratio:** {max_ratio:.1f}%")
                                     
-                                    st.markdown(f"""
-                                    ### Fair Metrics Analysis
-                                    - F1 (Citation Quality): {avg_metrics['F1']:.1f}%
-                                    - F2 (Citation Accuracy): {avg_metrics['F2']:.1f}%
-                                    - F3 (Uncited Content): {avg_metrics['F3']:.1f}%
-                                    - F4 (Content Novelty): {avg_metrics['F4']:.1f}%
-                                    """)
-                                    
-                                    st.markdown("### Statement Analysis")
-                                    for match in matches:
-                                        for detail in match['statement_details']:
-                                            with st.container():
-                                                match_color = (
-                                                    "🔴" if detail['type'] == 'P' else
-                                                    "🟡" if detail['type'] == 'M' else
-                                                    "🟢" if detail['type'] == 'Q' else
-                                                    "⚪"
-                                                )
-                                                
-                                                match_type = {
-                                                    'P': 'Plagiarized',
-                                                    'M': 'Misquoted',
-                                                    'Q': 'Properly Cited',
-                                                    'N': 'Novel'
-                                                }[detail['type']]
-                                                
-                                                st.markdown(f"""
-                                                {match_color} **Match Type: {match_type}**
-                                                
-                                                **Your Text:**
-                                                {detail['test_statement']}
-                                                
-                                                **Matched Text:**
-                                                {detail['control_statement']}
-                                                
-                                                **Similarity:** {detail['similarity']:.1f}
-                                                """)
-                                                st.markdown("---")
+                                    st.markdown("### Matching Content")
+                                    for match in sorted(matches, key=lambda x: x['adjusted_exact_score'], reverse=True):
+                                        with st.container():
+                                            score_color = (
+                                                "🔴" if match['adjusted_exact_score'] >= 90 else
+                                                "🟡" if match['adjusted_exact_score'] >= 70 else
+                                                "🔵"
+                                            )
+                                            
+                                            st.markdown(f"""
+                                            {score_color} **Adjusted Match Score: {match['adjusted_exact_score']:.1f}%**
+                                            - Original Score: {match['exact_score']:.1f}%
+                                            - Text Ratio: {match['text_ratio']:.1f}%
+                                            - Input Words: {match['input_word_count']}
+                                            - Source Words: {match['source_word_count']}
+                                            
+                                            **Your Text:**
+                                            {match['input_text']}
+                                            
+                                            **Matched Text:**
+                                            {match['matching_text']}
+                                            
+                                            **Match Details:**
+                                            - Semantic Score: {match['adjusted_semantic_score']:.1f}%
+                                            - Type: {match['match_type'].title()}
+                                            """)
+                                            st.markdown("---")
                             
-                            match_level = "High" if plagiarism_percent > 80 else "Moderate" if plagiarism_percent > 50 else "Low"
+                            st.info(f"""
+                            📊 Analysis Summary:
+                            - Total Sources: {len(sources)}
+                            - Total Matches: {len(results)}
+                            - Overall Similarity: {internet_content_percent:.1f}%
+                            - Average Text Ratio: {sum(r['text_ratio'] for r in results) / len(results):.1f}%
+                            """)
                             
                             if st.button("📥 Download Detailed Report"):
                                 report = generate_report(
                                     results,
                                     exact_match_percent,
                                     similar_content_percent,
-                                    plagiarism_percent,
-                                    improper_percent,
+                                    internet_content_percent,
+                                    paraphrase_percent,
                                     similarity_threshold,
                                     len(search_results),
                                     sources
@@ -564,11 +571,11 @@ def main():
                                 st.download_button(
                                     "📄 Save Report",
                                     report,
-                                    "fair_metrics_report.txt",
+                                    "plagiarism_report.txt",
                                     "text/plain"
                                 )
                         else:
-                            st.success(f"✅ No significant matches found above {similarity_threshold}% threshold!")
+                            st.success(f"✅ No significant matches found above {similarity_threshold}% similarity threshold!")
                     else:
                         st.warning("No search results found. Try modifying your text or check your API key.")
                         
@@ -578,23 +585,22 @@ def main():
 
     st.sidebar.title("ℹ️ About")
     st.sidebar.write("""
-    ### Fair Metrics Analysis:
-    1. Statement Analysis:
-       - Citation detection
-       - Statement classification
-       - Semantic similarity
+    ### Advanced Analysis Features:
+    1. Text Ratio Analysis:
+       - Word count comparison
+       - Character length analysis
+       - Adjusted similarity scores
 
-    2. Fair Metrics:
-       - F1: Citation Quality [0,1]
-       - F2: Citation Accuracy [-1,+1]
-       - F3: Uncited Content [-1,+1]
-       - F4: Content Novelty [-1,+1]
+    2. Similarity Detection:
+       - Exact Match Detection
+       - Semantic Analysis
+       - Paraphrase Recognition
+       - Length-Aware Scoring
 
-    3. Classification:
-       - Q: Properly cited content
-       - M: Incorrectly cited content
-       - P: Uncited similar content
-       - N: Novel content
+    3. Search Optimization:
+       - Multi-query generation
+       - Key term extraction
+       - Intelligent source filtering
 
     ### Current Settings:
     - Similarity Threshold: {}%
